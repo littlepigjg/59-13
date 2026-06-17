@@ -112,6 +112,24 @@ Content-Type: application/json
 }`;
     });
 
+    const enumSourceTypes = [
+      { value: 'static', label: '静态选项' },
+      { value: 'api', label: 'API 动态获取' },
+      { value: 'dependent', label: '依赖其他字段' }
+    ];
+
+    const enumSourceType = ref('static');
+    const resolvingEnum = ref(false);
+    const resolvedEnumOptions = ref([]);
+    const enumResolveError = ref('');
+    const dependentFieldOptions = computed(() => {
+      if (!modelForm.fields) return [];
+      const currentIdx = editingFieldIndex.value;
+      return modelForm.fields
+        .filter((f, idx) => idx !== currentIdx && ['string', 'number', 'enum'].includes(f.type))
+        .map(f => ({ value: f.name, label: `${f.label || f.name} (${f.name})` }));
+    });
+
     const getDefaultRule = (type) => {
       switch (type) {
         case 'string':
@@ -144,10 +162,152 @@ Content-Type: application/json
         case 'enum':
           return {
             options: [],
-            weights: []
+            weights: [],
+            fallbackOptions: [],
+            dynamic: null
           };
         default:
           return {};
+      }
+    };
+
+    const onEnumSourceTypeChange = (type) => {
+      enumSourceType.value = type;
+      
+      if (!currentField.value) {
+        resolvedEnumOptions.value = [];
+        enumResolveError.value = '';
+        return;
+      }
+      
+      if (type === 'static') {
+        currentField.value.rule.dynamic = null;
+      } else if (type === 'api') {
+        currentField.value.rule.dynamic = {
+          type: 'api',
+          url: '',
+          method: 'GET',
+          headers: {},
+          body: null,
+          path: '',
+          valueField: '',
+          labelField: '',
+          cache: true
+        };
+      } else if (type === 'dependent') {
+        currentField.value.rule.dynamic = {
+          type: 'dependent',
+          dependsOn: '',
+          optionsMap: {},
+          defaultOptions: []
+        };
+      }
+      resolvedEnumOptions.value = [];
+      enumResolveError.value = '';
+    };
+
+    const initEnumSourceType = () => {
+      if (currentField.value?.rule?.dynamic) {
+        enumSourceType.value = currentField.value.rule.dynamic.type;
+      } else {
+        enumSourceType.value = 'static';
+      }
+      resolvedEnumOptions.value = [];
+      enumResolveError.value = '';
+    };
+
+    const addDependentOption = () => {
+      if (!currentField.value?.rule?.dynamic?.optionsMap) return;
+      const newKey = prompt('请输入依赖值（例如：技术部）');
+      if (newKey && currentField.value.rule.dynamic.optionsMap[newKey] === undefined) {
+        currentField.value.rule.dynamic.optionsMap[newKey] = [];
+      }
+    };
+
+    const removeDependentOption = (key) => {
+      if (currentField.value?.rule?.dynamic?.optionsMap) {
+        delete currentField.value.rule.dynamic.optionsMap[key];
+      }
+    };
+
+    const addOptionToDependent = (key) => {
+      if (!currentField.value?.rule?.dynamic?.optionsMap) return;
+      const newValue = prompt('请输入选项值');
+      if (newValue && !currentField.value.rule.dynamic.optionsMap[key].includes(newValue)) {
+        currentField.value.rule.dynamic.optionsMap[key].push(newValue);
+      }
+    };
+
+    const removeOptionFromDependent = (key, option) => {
+      if (currentField.value?.rule?.dynamic?.optionsMap) {
+        const idx = currentField.value.rule.dynamic.optionsMap[key].indexOf(option);
+        if (idx > -1) {
+          currentField.value.rule.dynamic.optionsMap[key].splice(idx, 1);
+        }
+      }
+    };
+
+    const addHeader = () => {
+      if (!currentField.value?.rule?.dynamic?.headers) return;
+      currentField.value.rule.dynamic.headers[''] = '';
+    };
+
+    const removeHeader = (key) => {
+      if (currentField.value?.rule?.dynamic?.headers) {
+        delete currentField.value.rule.dynamic.headers[key];
+      }
+    };
+
+    const updateHeaderKey = (oldKey, newKey) => {
+      if (currentField.value?.rule?.dynamic?.headers) {
+        const value = currentField.value.rule.dynamic.headers[oldKey];
+        delete currentField.value.rule.dynamic.headers[oldKey];
+        currentField.value.rule.dynamic.headers[newKey] = value;
+      }
+    };
+
+    const resolveDynamicEnum = async () => {
+      if (!currentField.value?.rule) return;
+      
+      resolvingEnum.value = true;
+      enumResolveError.value = '';
+      resolvedEnumOptions.value = [];
+
+      try {
+        const context = {};
+        if (currentField.value.rule.dynamic?.type === 'dependent' && currentField.value.rule.dynamic.dependsOn) {
+          const depField = modelForm.fields.find(f => f.name === currentField.value.rule.dynamic.dependsOn);
+          if (depField?.type === 'enum' && depField?.rule?.options?.length > 0) {
+            context[currentField.value.rule.dynamic.dependsOn] = depField.rule.options[0];
+          }
+        }
+
+        const response = await fetch('/api/resolve-enum', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rule: currentField.value.rule,
+            context: context
+          })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+          resolvedEnumOptions.value = result.data.options;
+          if (result.data.usedFallback) {
+            ElMessage.warning('动态枚举获取失败，已使用降级选项');
+          } else {
+            ElMessage.success(`成功获取 ${result.data.options.length} 个选项`);
+          }
+        } else {
+          enumResolveError.value = result.error;
+          ElMessage.error(result.error);
+        }
+      } catch (error) {
+        enumResolveError.value = error.message;
+        ElMessage.error('解析失败：' + error.message);
+      } finally {
+        resolvingEnum.value = false;
       }
     };
 
@@ -186,6 +346,9 @@ Content-Type: application/json
     const onTypeChange = (newType) => {
       if (currentField.value) {
         currentField.value.rule = getDefaultRule(newType);
+        if (newType === 'enum') {
+          initEnumSourceType();
+        }
       }
     };
 
@@ -603,6 +766,12 @@ Content-Type: application/json
       }
     });
 
+    watch(editingFieldIndex, () => {
+      if (currentField.value?.type === 'enum') {
+        initEnumSourceType();
+      }
+    });
+
     onMounted(() => {
       loadMeta();
       initDefaultModel();
@@ -633,10 +802,26 @@ Content-Type: application/json
       displayTotalCount,
       generateApiExample,
       pageApiExample,
+      enumSourceTypes,
+      enumSourceType,
+      resolvingEnum,
+      resolvedEnumOptions,
+      enumResolveError,
+      dependentFieldOptions,
       addField,
       removeField,
       selectField,
       onTypeChange,
+      onEnumSourceTypeChange,
+      initEnumSourceType,
+      addDependentOption,
+      removeDependentOption,
+      addOptionToDependent,
+      removeOptionFromDependent,
+      addHeader,
+      removeHeader,
+      updateHeaderKey,
+      resolveDynamicEnum,
       getTypeIcon,
       getTypeLabel,
       randomSeed,

@@ -3,8 +3,14 @@ const router = express.Router();
 const ModelParser = require('../models/ModelParser');
 const DataGenerator = require('../generator/DataGenerator');
 const DataConverter = require('../utils/converter');
+const DynamicEnumResolver = require('../utils/DynamicEnumResolver');
 
 const modelParser = new ModelParser();
+const enumResolver = new DynamicEnumResolver({
+  cacheTTL: 5 * 60 * 1000,
+  timeout: 10000,
+  maxRetries: 2
+});
 
 router.post('/parse', (req, res) => {
   try {
@@ -22,12 +28,12 @@ router.post('/parse', (req, res) => {
   }
 });
 
-router.post('/generate', (req, res) => {
+router.post('/generate', async (req, res) => {
   try {
     const { model, count = 10, seed } = req.body;
     const parsedModel = modelParser.parse(model);
     const generator = new DataGenerator(seed);
-    const data = generator.generate(parsedModel, count);
+    const data = await generator.generate(parsedModel, count);
 
     res.json({
       success: true,
@@ -45,13 +51,13 @@ router.post('/generate', (req, res) => {
   }
 });
 
-router.post('/generate/skip', (req, res) => {
+router.post('/generate/skip', async (req, res) => {
   try {
     const { model, skip = 0, limit = 20, seed, total } = req.body;
     const parsedModel = modelParser.parse(model);
     const generator = new DataGenerator(seed);
 
-    const result = generator.generateWithSkipLimit(parsedModel, skip, limit, {
+    const result = await generator.generateWithSkipLimit(parsedModel, skip, limit, {
       total: total || 1000
     });
 
@@ -67,13 +73,13 @@ router.post('/generate/skip', (req, res) => {
   }
 });
 
-router.post('/generate/page', (req, res) => {
+router.post('/generate/page', async (req, res) => {
   try {
     const { model, page = 1, pageSize = 20, seed, total } = req.body;
     const parsedModel = modelParser.parse(model);
     const generator = new DataGenerator(seed);
 
-    const result = generator.generateWithPagination(parsedModel, page, pageSize, {
+    const result = await generator.generateWithPagination(parsedModel, page, pageSize, {
       total: total || 1000
     });
 
@@ -89,7 +95,7 @@ router.post('/generate/page', (req, res) => {
   }
 });
 
-router.post('/export/json', (req, res) => {
+router.post('/export/json', async (req, res) => {
   try {
     const { model, count = 100, seed, data } = req.body;
 
@@ -99,7 +105,7 @@ router.post('/export/json', (req, res) => {
     if (!exportData || !Array.isArray(exportData)) {
       const parsedModel = modelParser.parse(model);
       const generator = new DataGenerator(seed);
-      exportData = generator.generate(parsedModel, count);
+      exportData = await generator.generate(parsedModel, count);
       exportModel = parsedModel;
     }
 
@@ -113,7 +119,7 @@ router.post('/export/json', (req, res) => {
   }
 });
 
-router.post('/export/csv', (req, res) => {
+router.post('/export/csv', async (req, res) => {
   try {
     const { model, count = 100, seed, data } = req.body;
 
@@ -123,12 +129,93 @@ router.post('/export/csv', (req, res) => {
     if (!exportData || !Array.isArray(exportData)) {
       const parsedModel = modelParser.parse(model);
       const generator = new DataGenerator(seed);
-      exportData = generator.generate(parsedModel, count);
+      exportData = await generator.generate(parsedModel, count);
       exportModel = parsedModel;
     }
 
     const filename = `${exportModel.name || 'data'}.csv`;
     DataConverter.downloadCSV(res, exportData, exportModel.fields, filename);
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+router.post('/resolve-enum', async (req, res) => {
+  try {
+    const { rule, context = {} } = req.body;
+
+    if (!rule || typeof rule !== 'object') {
+      throw new Error('必须提供枚举规则');
+    }
+
+    const parsedRule = modelParser.parseEnumRule(rule, 'preview');
+    const options = await enumResolver.resolve(parsedRule, context);
+    
+    let usedFallback = false;
+    if (options.length > 0 && parsedRule.fallbackOptions && parsedRule.fallbackOptions.length > 0) {
+      const optionValues = options.map(o => o.value).sort().join(',');
+      const fallbackValues = parsedRule.fallbackOptions.sort().join(',');
+      usedFallback = optionValues === fallbackValues;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        options: options,
+        usedFallback: usedFallback
+      }
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+router.post('/resolve-enum/batch', async (req, res) => {
+  try {
+    const { rules, context = {} } = req.body;
+
+    if (!Array.isArray(rules)) {
+      throw new Error('必须提供规则数组');
+    }
+
+    const results = await Promise.all(
+      rules.map(async (rule, index) => {
+        try {
+          const parsedRule = modelParser.parseEnumRule(rule, `field_${index}`);
+          const options = await enumResolver.resolve(parsedRule, context);
+          
+          let usedFallback = false;
+          if (options.length > 0 && parsedRule.fallbackOptions && parsedRule.fallbackOptions.length > 0) {
+            const optionValues = options.map(o => o.value).sort().join(',');
+            const fallbackValues = parsedRule.fallbackOptions.sort().join(',');
+            usedFallback = optionValues === fallbackValues;
+          }
+          
+          return {
+            success: true,
+            options: options,
+            usedFallback: usedFallback
+          };
+        } catch (error) {
+          return {
+            success: false,
+            error: error.message,
+            options: (rule.fallbackOptions || rule.options || []).map(item => ({ value: item, label: String(item) }))
+          };
+        }
+      })
+    );
+
+    res.json({
+      success: true,
+      data: results
+    });
   } catch (error) {
     res.status(400).json({
       success: false,

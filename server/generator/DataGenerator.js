@@ -1,10 +1,16 @@
 const RandomGenerator = require('../utils/random');
 const DICTIONARIES = require('../data/dictionaries');
+const DynamicEnumResolver = require('../utils/DynamicEnumResolver');
 
 class DataGenerator {
   constructor(seed = null) {
     this.baseSeed = seed;
     this.random = new RandomGenerator(seed);
+    this.enumResolver = new DynamicEnumResolver({
+      cacheTTL: 5 * 60 * 1000,
+      timeout: 10000,
+      maxRetries: 2
+    });
   }
 
   setSeed(seed) {
@@ -16,7 +22,7 @@ class DataGenerator {
     return this.baseSeed;
   }
 
-  generate(model, count = 10, options = {}) {
+  async generate(model, count = 10, options = {}) {
     if (!model || !model.fields) {
       throw new Error('无效的数据模型');
     }
@@ -25,30 +31,49 @@ class DataGenerator {
       this.setSeed(options.seed);
     }
 
+    await this.preResolveDynamicEnums(model);
+
     const results = [];
     for (let i = 0; i < count; i++) {
-      results.push(this.generateOne(model, i));
+      results.push(await this.generateOne(model, i));
     }
 
     return results;
   }
 
-  generateOne(model, rowIndex = 0) {
+  async generateOne(model, rowIndex = 0) {
     const rowRng = RandomGenerator.createRowGenerator(this.baseSeed, rowIndex);
     const result = {};
 
-    model.fields.forEach(field => {
+    for (const field of model.fields) {
       if (field.nullable && rowRng.random() < field.nullProbability) {
         result[field.name] = null;
       } else {
-        result[field.name] = this.generateField(field, rowRng);
+        result[field.name] = await this.generateField(field, rowRng, result);
       }
-    });
+    }
 
     return result;
   }
 
-  generateField(field, rng) {
+  async preResolveDynamicEnums(model) {
+    if (!model || !model.fields) return;
+
+    const independentEnums = model.fields.filter(field => 
+      field.type === 'enum' && 
+      field.rule && 
+      field.rule.dynamic && 
+      field.rule.dynamic.type === 'api'
+    );
+
+    await Promise.all(
+      independentEnums.map(field => 
+        this.enumResolver.resolve(field.rule, {}).catch(() => [])
+      )
+    );
+  }
+
+  async generateField(field, rng, context = {}) {
     switch (field.type) {
       case 'string':
         return this.generateString(field.rule, rng);
@@ -59,13 +84,13 @@ class DataGenerator {
       case 'date':
         return this.generateDate(field.rule, rng);
       case 'enum':
-        return this.generateEnum(field.rule, rng);
+        return await this.generateEnum(field.rule, rng, context);
       default:
         return null;
     }
   }
 
-  generateWithSkipLimit(model, skip, limit, options = {}) {
+  async generateWithSkipLimit(model, skip, limit, options = {}) {
     if (!model || !model.fields) {
       throw new Error('无效的数据模型');
     }
@@ -74,11 +99,13 @@ class DataGenerator {
       this.setSeed(options.seed);
     }
 
+    await this.preResolveDynamicEnums(model);
+
     const total = options.total || skip + limit;
     const results = [];
 
     for (let i = skip; i < skip + limit && i < total; i++) {
-      results.push(this.generateOne(model, i));
+      results.push(await this.generateOne(model, i));
     }
 
     return {
@@ -90,7 +117,7 @@ class DataGenerator {
     };
   }
 
-  generateWithPagination(model, page = 1, pageSize = 20, options = {}) {
+  async generateWithPagination(model, page = 1, pageSize = 20, options = {}) {
     const skip = (page - 1) * pageSize;
     const total = options.total || page * pageSize;
 
@@ -393,8 +420,30 @@ class DataGenerator {
       .replace(/ss/g, seconds);
   }
 
-  generateEnum(rule, rng) {
-    return rng.randomWeightedChoice(rule.options, rule.weights);
+  async generateEnum(rule, rng, context = {}) {
+    let options = rule.options || [];
+
+    if (rule.dynamic) {
+      try {
+        const resolvedOptions = await this.enumResolver.resolve(rule, context);
+        if (resolvedOptions && resolvedOptions.length > 0) {
+          options = resolvedOptions.map(opt => 
+            typeof opt === 'object' && opt !== null ? opt.value : opt
+          );
+        }
+      } catch (error) {
+        console.warn(`解析动态枚举失败，使用默认选项: ${error.message}`);
+        options = rule.fallbackOptions && rule.fallbackOptions.length > 0 
+          ? rule.fallbackOptions 
+          : (rule.options || []);
+      }
+    }
+
+    if (!options || options.length === 0) {
+      return null;
+    }
+
+    return rng.randomWeightedChoice(options, rule.weights || []);
   }
 }
 

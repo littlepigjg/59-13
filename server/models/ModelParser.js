@@ -160,13 +160,106 @@ class ModelParser {
   }
 
   parseEnumRule(rule, fieldName) {
-    if (!Array.isArray(rule.options) || rule.options.length === 0) {
-      throw new Error(`字段 ${fieldName} 必须提供 options 数组`);
+    const parsedRule = {
+      options: rule.options || [],
+      weights: rule.weights || [],
+      fallbackOptions: rule.fallbackOptions || [],
+      dynamic: null
+    };
+
+    if (rule.dynamic && typeof rule.dynamic === 'object') {
+      parsedRule.dynamic = this.parseDynamicEnumConfig(rule.dynamic, fieldName);
+    }
+
+    if (!parsedRule.dynamic && (!Array.isArray(parsedRule.options) || parsedRule.options.length === 0)) {
+      throw new Error(`字段 ${fieldName} 必须提供 options 数组或 dynamic 配置`);
+    }
+
+    if (parsedRule.fallbackOptions.length > 0 && !Array.isArray(parsedRule.fallbackOptions)) {
+      throw new Error(`字段 ${fieldName} 的 fallbackOptions 必须是数组`);
+    }
+
+    return parsedRule;
+  }
+
+  parseDynamicEnumConfig(config, fieldName) {
+    const { type } = config;
+
+    if (!type || !['api', 'dependent'].includes(type)) {
+      throw new Error(`字段 ${fieldName} 的动态枚举类型必须是 'api' 或 'dependent'`);
+    }
+
+    if (type === 'api') {
+      return this.parseApiDynamicConfig(config, fieldName);
+    } else if (type === 'dependent') {
+      return this.parseDependentDynamicConfig(config, fieldName);
+    }
+
+    return { type };
+  }
+
+  parseApiDynamicConfig(config, fieldName) {
+    if (!config.url || typeof config.url !== 'string') {
+      throw new Error(`字段 ${fieldName} 的 API 动态枚举必须提供 url`);
+    }
+
+    if (config.method && !['GET', 'POST', 'PUT', 'DELETE'].includes(config.method.toUpperCase())) {
+      throw new Error(`字段 ${fieldName} 的 method 必须是 GET, POST, PUT 或 DELETE`);
+    }
+
+    if (config.headers && typeof config.headers !== 'object') {
+      throw new Error(`字段 ${fieldName} 的 headers 必须是对象`);
+    }
+
+    if (config.path && typeof config.path !== 'string') {
+      throw new Error(`字段 ${fieldName} 的 path 必须是字符串，用于从响应中提取数据`);
+    }
+
+    if (config.valueField && typeof config.valueField !== 'string') {
+      throw new Error(`字段 ${fieldName} 的 valueField 必须是字符串`);
+    }
+
+    if (config.labelField && typeof config.labelField !== 'string') {
+      throw new Error(`字段 ${fieldName} 的 labelField 必须是字符串`);
     }
 
     return {
-      options: rule.options,
-      weights: rule.weights || []
+      type: 'api',
+      url: config.url,
+      method: (config.method || 'GET').toUpperCase(),
+      headers: config.headers || {},
+      body: config.body || null,
+      path: config.path || null,
+      valueField: config.valueField || null,
+      labelField: config.labelField || null,
+      cache: config.cache !== false
+    };
+  }
+
+  parseDependentDynamicConfig(config, fieldName) {
+    if (!config.dependsOn || typeof config.dependsOn !== 'string') {
+      throw new Error(`字段 ${fieldName} 的依赖动态枚举必须提供 dependsOn 字段名`);
+    }
+
+    if (!config.optionsMap || typeof config.optionsMap !== 'object') {
+      throw new Error(`字段 ${fieldName} 的依赖动态枚举必须提供 optionsMap 对象`);
+    }
+
+    for (const [key, options] of Object.entries(config.optionsMap)) {
+      if (!Array.isArray(options)) {
+        throw new Error(`字段 ${fieldName} 的 optionsMap['${key}'] 必须是数组`);
+      }
+    }
+
+    if (config.defaultOptions && !Array.isArray(config.defaultOptions)) {
+      throw new Error(`字段 ${fieldName} 的 defaultOptions 必须是数组`);
+    }
+
+    return {
+      type: 'dependent',
+      dependsOn: config.dependsOn,
+      optionsMap: config.optionsMap,
+      defaultOptions: config.defaultOptions || []
     };
   }
 
